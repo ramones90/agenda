@@ -1,0 +1,5 @@
+{
+  "name": "PsiConnect - Plataforma de Saúde Mental",
+  "description": "Plataforma SaaS para psicólogos e pacientes com telemedicina, IA e gamificação.",
+  "requestFramePermissions": ["camera", "microphone"]
+}
