@@ -4,22 +4,156 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { GoogleGenAI } from '@google/genai';
 import { v4 as uuidv4 } from 'uuid';
+import { MercadoPagoConfig, Preference } from 'mercadopago';
 import db from './db.ts';
 import { google } from 'googleapis';
 import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import cookieParser from 'cookie-parser';
+import { z } from 'zod';
+// @ts-ignore
+import { authenticator } from 'otplib';
+import QRCode from 'qrcode';
+import winston from 'winston';
 
 const app = express();
 const httpServer = createServer(app);
+const JWT_SECRET = process.env.JWT_SECRET;
+const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || 'psiconnect-refresh-secret-2026';
+
+if (!JWT_SECRET) {
+  console.error('CRITICAL: JWT_SECRET environment variable is not set.');
+  process.exit(1);
+}
+
 const io = new Server(httpServer, {
   cors: {
-    origin: "*",
+    origin: process.env.NODE_ENV === 'production' ? false : "*", // Restrict in production
     methods: ["GET", "POST"]
   }
 });
 
 const PORT = 3000;
 
+app.use(cookieParser());
+app.use(helmet({
+  contentSecurityPolicy: false, 
+}));
 app.use(express.json());
+
+// Security Logger
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+  ),
+  transports: [
+    new winston.transports.Console(),
+  ],
+});
+
+const logSecurityEvent = (event: string, details: any, severity: 'info' | 'warning' | 'critical' = 'info') => {
+  const timestamp = new Date().toISOString();
+  const userId = details.userId || null;
+  const ip = details.ip || 'unknown';
+  const detailsStr = JSON.stringify(details);
+
+  try {
+    // @ts-ignore
+    db.prepare('INSERT INTO audit_logs (id, user_id, event, details, ip, severity, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(uuidv4(), userId, event, detailsStr, ip, severity, timestamp);
+  } catch (err) {
+    console.error('Failed to write audit log:', err);
+  }
+
+  logger.log(severity === 'critical' ? 'error' : severity === 'warning' ? 'warn' : 'info', {
+    event,
+    ...details,
+    timestamp
+  });
+};
+
+// Software WAF Middleware
+const wafMiddleware = (req: any, res: any, next: any) => {
+  const maliciousPatterns = [
+    /<script/i,
+    /javascript:/i,
+    /onload=/i,
+    /onerror=/i,
+    /union select/i,
+    /drop table/i,
+    /--/i,
+    /\.\.\//i, // Path traversal
+  ];
+
+  const checkValue = (val: any): boolean => {
+    if (typeof val === 'string') {
+      return maliciousPatterns.some(pattern => pattern.test(val));
+    }
+    if (typeof val === 'object' && val !== null) {
+      return Object.values(val).some(v => checkValue(v));
+    }
+    return false;
+  };
+
+  if (checkValue(req.body) || checkValue(req.query) || checkValue(req.params)) {
+    logSecurityEvent('WAF_BLOCK', { 
+      ip: req.ip, 
+      path: req.path, 
+      method: req.method,
+      body: req.body,
+      query: req.query
+    }, 'warning');
+    return res.status(403).json({ error: 'Requisição bloqueada por motivos de segurança.' });
+  }
+
+  next();
+};
+
+app.use(wafMiddleware);
+
+// Rate Limiting
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  message: { error: 'Muitas requisições deste IP, tente novamente mais tarde.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const authLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10, // Limit each IP to 10 login/register attempts per hour
+  message: { error: 'Muitas tentativas de acesso, tente novamente em uma hora.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use('/api/', generalLimiter);
+app.use('/api/login', authLimiter);
+app.use('/api/register', authLimiter);
+
+// Authentication Middleware
+const authenticateToken = (req: any, res: any, next: any) => {
+  const token = req.cookies.accessToken;
+
+  if (!token) {
+    logSecurityEvent('UNAUTHORIZED_ACCESS_ATTEMPT', { path: req.path, ip: req.ip });
+    return res.status(401).json({ error: 'Sessão expirada ou não autenticada.' });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err: any, user: any) => {
+    if (err) {
+      logSecurityEvent('INVALID_TOKEN_ATTEMPT', { path: req.path, ip: req.ip, error: err.message });
+      return res.status(403).json({ error: 'Sessão inválida. Por favor, faça login novamente.' });
+    }
+    req.user = user;
+    next();
+  });
+};
 
 // Ensure test users exist
 try {
@@ -55,13 +189,9 @@ const getRedirectUri = (req: express.Request) => {
 };
 
 // Auth Routes for Google Calendar
-app.get('/api/auth/google/url', (req, res) => {
-  const { userId } = req.query;
+app.get('/api/auth/google/url', authenticateToken, (req: any, res) => {
+  const userId = req.user.id;
   
-  if (!userId) {
-    return res.status(400).json({ error: 'User ID is required' });
-  }
-
   const redirectUri = getRedirectUri(req);
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
@@ -125,15 +255,45 @@ app.get('/auth/callback/google', async (req, res) => {
 });
 
 // Check if user is connected to Google
-app.get('/api/users/:userId/google-status', (req, res) => {
+app.get('/api/users/:userId/google-status', authenticateToken, (req: any, res) => {
   const { userId } = req.params;
+  if (req.user.id !== userId && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
   // @ts-ignore
   const user = db.prepare('SELECT google_refresh_token FROM users WHERE id = ?').get(userId);
   res.json({ isConnected: !!user?.google_refresh_token });
 });
 
+app.get('/api/users/:userId/mercadopago-status', authenticateToken, (req: any, res) => {
+  const { userId } = req.params;
+  if (req.user.id !== userId && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
+  // @ts-ignore
+  const user = db.prepare('SELECT mercadopago_access_token FROM users WHERE id = ?').get(userId);
+  res.json({ isConnected: !!user?.mercadopago_access_token, token: user?.mercadopago_access_token });
+});
+
 // Socket.IO Signaling for Video Calls
 const roomParticipants = new Map<string, Set<string>>();
+
+io.use((socket, next) => {
+  const cookies = (socket.handshake.headers.cookie || '').split(';').reduce((acc: any, curr) => {
+    const [key, value] = curr.trim().split('=');
+    acc[key] = value;
+    return acc;
+  }, {});
+
+  const token = cookies.accessToken;
+  if (!token) return next(new Error('Authentication error'));
+  
+  jwt.verify(token, JWT_SECRET, (err: any, decoded: any) => {
+    if (err) return next(new Error('Authentication error'));
+    (socket as any).user = decoded;
+    next();
+  });
+});
 
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
@@ -191,11 +351,9 @@ io.on('connection', (socket) => {
 });
 
 // API Routes
-app.get('/api/rooms/:roomId/validate', (req, res) => {
+app.get('/api/rooms/:roomId/validate', authenticateToken, (req: any, res) => {
   const { roomId } = req.params;
-  const { userId } = req.query;
-
-  if (!userId) return res.status(400).json({ error: 'User ID required' });
+  const userId = req.user.id;
 
   // @ts-ignore
   const appointment = db.prepare('SELECT * FROM appointments WHERE id = ?').get(roomId);
@@ -219,64 +377,268 @@ app.get('/api/health', (req, res) => {
 });
 
 // Auth
-app.post('/api/login', (req, res) => {
-  const { role, email, password } = req.body;
-  
-  if (!email || !password) {
-    return res.status(400).json({ error: 'Email e senha são obrigatórios.' });
-  }
-
-  // @ts-ignore
-  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-
-  if (!user) {
-    return res.status(401).json({ error: 'Usuário não encontrado. Verifique seu email ou faça o cadastro.' });
-  }
-
-  if (user.password) {
-    const isPasswordValid = bcrypt.compareSync(password, user.password);
-    if (!isPasswordValid) {
-      return res.status(401).json({ error: 'Senha incorreta.' });
-    }
-  }
-
-  if (user.role !== role) {
-    return res.status(401).json({ error: `Este email não pertence a um perfil de ${role === 'patient' ? 'paciente' : role === 'psychologist' ? 'psicólogo' : 'administrador'}.` });
-  }
-  
-  res.json(user);
+const loginSchema = z.object({
+  role: z.enum(['patient', 'psychologist', 'admin']),
+  email: z.string().email('Email inválido'),
+  password: z.string().min(8, 'A senha deve ter pelo menos 8 caracteres'),
 });
 
-app.post('/api/register', (req, res) => {
-  const { name, email, password, role, phone, birthDate } = req.body;
-
-  if (!name || !email || !password || !role) {
-    return res.status(400).json({ error: 'Todos os campos são obrigatórios.' });
-  }
-
-  // Check if user exists
-  // @ts-ignore
-  const existing = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-  if (existing) {
-    return res.status(400).json({ error: 'Este email já está em uso.' });
-  }
-
-  const id = uuidv4();
-  const avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random`;
-  const hashedPassword = bcrypt.hashSync(password, 10);
-
+app.post('/api/login', authLimiter, (req, res) => {
   try {
+    const { role, email, password } = loginSchema.parse(req.body);
+    
+    // @ts-ignore
+    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+
+    if (!user) {
+      logSecurityEvent('LOGIN_FAILURE', { email, reason: 'User not found', ip: req.ip });
+      return res.status(401).json({ error: 'Credenciais inválidas.' });
+    }
+
+    if (user.password) {
+      const isPasswordValid = bcrypt.compareSync(password, user.password);
+      if (!isPasswordValid) {
+        logSecurityEvent('LOGIN_FAILURE', { email, userId: user.id, reason: 'Wrong password', ip: req.ip });
+        return res.status(401).json({ error: 'Credenciais inválidas.' });
+      }
+    }
+
+    if (user.role !== role) {
+      logSecurityEvent('LOGIN_FAILURE', { email, userId: user.id, reason: 'Role mismatch', ip: req.ip });
+      return res.status(401).json({ error: 'Credenciais inválidas.' });
+    }
+
+    // Check for MFA
+    if (user.mfa_enabled && (user.role === 'psychologist' || user.role === 'admin')) {
+      logSecurityEvent('MFA_REQUIRED', { userId: user.id, email: user.email, role: user.role, ip: req.ip });
+      return res.json({ 
+        mfaRequired: true, 
+        userId: user.id,
+        message: 'Autenticação de dois fatores necessária.' 
+      });
+    }
+    
+    const accessToken = jwt.sign(
+      { id: user.id, role: user.role, email: user.email },
+      JWT_SECRET,
+      { expiresIn: '15m' }
+    );
+
+    const refreshToken = uuidv4();
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 7); // 7 days
+
+    // Store refresh token
+    db.prepare('INSERT INTO refresh_tokens (token, user_id, expires_at) VALUES (?, ?, ?)')
+      .run(refreshToken, user.id, expiresAt.toISOString());
+
+    // Set cookies
+    res.cookie('accessToken', accessToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 15 * 60 * 1000, // 15m
+    });
+
+    res.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      path: '/api/refresh', // Only send to refresh endpoint
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7d
+    });
+
+    logSecurityEvent('LOGIN_SUCCESS', { userId: user.id, email: user.email, role: user.role, ip: req.ip });
+
+    const { password: _, mercadopago_access_token: __, google_refresh_token: ___, ...userSafe } = user;
+    res.json({ user: userSafe });
+  } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.issues[0].message });
+    }
+    res.status(500).json({ error: 'Erro interno no servidor.' });
+  }
+});
+
+app.post('/api/refresh', (req, res) => {
+  const refreshToken = req.cookies.refreshToken;
+  if (!refreshToken) return res.status(401).json({ error: 'Refresh token missing' });
+
+  const storedToken = db.prepare('SELECT * FROM refresh_tokens WHERE token = ? AND revoked = 0').get(refreshToken) as any;
+  if (!storedToken || new Date(storedToken.expires_at) < new Date()) {
+    return res.status(401).json({ error: 'Invalid or expired refresh token' });
+  }
+
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(storedToken.user_id) as any;
+  if (!user) return res.status(401).json({ error: 'User not found' });
+
+  const newAccessToken = jwt.sign(
+    { id: user.id, role: user.role, email: user.email },
+    JWT_SECRET,
+    { expiresIn: '15m' }
+  );
+
+  res.cookie('accessToken', newAccessToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 15 * 60 * 1000,
+  });
+
+  res.json({ success: true });
+});
+
+app.post('/api/logout', (req, res) => {
+  const refreshToken = req.cookies.refreshToken;
+  if (refreshToken) {
+    db.prepare('UPDATE refresh_tokens SET revoked = 1 WHERE token = ?').run(refreshToken);
+  }
+  res.clearCookie('accessToken');
+  res.clearCookie('refreshToken', { path: '/api/refresh' });
+  res.json({ success: true });
+});
+
+// MFA Endpoints
+app.post('/api/mfa/setup', authenticateToken, async (req: any, res) => {
+  const userId = req.user.id;
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as any;
+
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  if (user.role === 'patient') return res.status(403).json({ error: 'MFA não disponível para pacientes.' });
+
+  const secret = authenticator.generateSecret();
+  const otpauth = authenticator.keyuri(user.email, 'Psiconnect', secret);
+  
+  try {
+    const qrCodeUrl = await QRCode.toDataURL(otpauth);
+    // Store secret temporarily (or permanently but disabled)
+    db.prepare('UPDATE users SET mfa_secret = ? WHERE id = ?').run(secret, userId);
+    
+    res.json({ qrCodeUrl, secret });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to generate QR code' });
+  }
+});
+
+app.post('/api/mfa/verify', authenticateToken, (req: any, res) => {
+  const userId = req.user.id;
+  const { code } = req.body;
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as any;
+
+  if (!user || !user.mfa_secret) return res.status(400).json({ error: 'MFA not setup' });
+
+  const isValid = authenticator.check(code, user.mfa_secret);
+  if (isValid) {
+    db.prepare('UPDATE users SET mfa_enabled = 1 WHERE id = ?').run(userId);
+    logSecurityEvent('MFA_ENABLED', { userId, ip: req.ip });
+    res.json({ success: true });
+  } else {
+    logSecurityEvent('MFA_VERIFY_FAILURE', { userId, ip: req.ip }, 'warning');
+    res.status(400).json({ error: 'Código inválido.' });
+  }
+});
+
+app.post('/api/mfa/validate-login', authLimiter, (req, res) => {
+  const { userId, code } = req.body;
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as any;
+
+  if (!user || !user.mfa_secret || !user.mfa_enabled) {
+    return res.status(400).json({ error: 'MFA not enabled' });
+  }
+
+  const isValid = authenticator.check(code, user.mfa_secret);
+  if (!isValid) {
+    logSecurityEvent('MFA_LOGIN_FAILURE', { userId, ip: req.ip }, 'warning');
+    return res.status(401).json({ error: 'Código inválido.' });
+  }
+
+  const accessToken = jwt.sign(
+    { id: user.id, role: user.role, email: user.email },
+    JWT_SECRET,
+    { expiresIn: '15m' }
+  );
+
+  const refreshToken = uuidv4();
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + 7);
+
+  db.prepare('INSERT INTO refresh_tokens (token, user_id, expires_at) VALUES (?, ?, ?)')
+    .run(refreshToken, user.id, expiresAt.toISOString());
+
+  res.cookie('accessToken', accessToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 15 * 60 * 1000,
+  });
+
+  res.cookie('refreshToken', refreshToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    path: '/api/refresh',
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+  });
+
+  logSecurityEvent('LOGIN_SUCCESS_MFA', { userId: user.id, email: user.email, role: user.role, ip: req.ip });
+
+  const { password: _, mercadopago_access_token: __, google_refresh_token: ___, ...userSafe } = user;
+  res.json({ user: userSafe });
+});
+
+// Audit Logs
+app.get('/api/admin/audit-logs', authenticateToken, (req: any, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Acesso negado.' });
+  
+  const logs = db.prepare('SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 100').all();
+  res.json(logs);
+});
+
+const registerSchema = z.object({
+  name: z.string().min(2, 'Nome muito curto'),
+  email: z.string().email('Email inválido'),
+  password: z.string().min(8, 'A senha deve ter pelo menos 8 caracteres'),
+  role: z.literal('patient'),
+  phone: z.string().optional(),
+  birthDate: z.string().optional(),
+});
+
+app.post('/api/register', authLimiter, (req, res) => {
+  try {
+    const { name, email, password, role, phone, birthDate } = registerSchema.parse(req.body);
+
+    // Check if user exists
+    // @ts-ignore
+    const existing = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    if (existing) {
+      return res.status(400).json({ error: 'Este email já está em uso.' });
+    }
+
+    const id = uuidv4();
+    const avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random`;
+    const hashedPassword = bcrypt.hashSync(password, 12); // Increased salt rounds
+
     // @ts-ignore
     db.prepare('INSERT INTO users (id, name, role, email, password, avatar, phone, birthDate) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, name, role, email, hashedPassword, avatar, phone, birthDate);
-    res.json({ id, name, role, email, avatar, phone, birthDate });
-  } catch (error) {
+    
+    logSecurityEvent('USER_REGISTERED', { userId: id, email, role, ip: req.ip });
+
+    res.json({ success: true, message: 'Conta criada com sucesso. Por favor, faça login.' });
+  } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.issues[0].message });
+    }
     console.error(error);
     res.status(500).json({ error: 'Erro ao criar conta.' });
   }
 });
 
 // Admin: Create Psychologist
-app.post('/api/admin/psychologists', (req, res) => {
+app.post('/api/admin/psychologists', authenticateToken, (req: any, res) => {
+  if (req.user.role !== 'admin') {
+    logSecurityEvent('UNAUTHORIZED_ADMIN_ACTION', { userId: req.user.id, action: 'create_psychologist', ip: req.ip });
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
   const { name, email } = req.body;
   const id = uuidv4();
   const avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random`;
@@ -295,15 +657,17 @@ app.post('/api/admin/psychologists', (req, res) => {
 });
 
 // Admin: List Psychologists
-app.get('/api/admin/psychologists', (req, res) => {
+app.get('/api/admin/psychologists', authenticateToken, (req: any, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Acesso negado.' });
   // @ts-ignore
   const psychologists = db.prepare("SELECT * FROM users WHERE role = 'psychologist'").all();
   res.json(psychologists);
 });
 
 // Patients
-app.get('/api/patients', (req, res) => {
-  const { psychologistId } = req.query;
+app.get('/api/patients', authenticateToken, (req: any, res) => {
+  if (req.user.role !== 'psychologist') return res.status(403).json({ error: 'Acesso negado.' });
+  const psychologistId = req.user.id;
   // In a real app, we would filter by patients who have appointments with this psychologist
   // For now, let's return all patients to make it easier to test
   const patients = db.prepare("SELECT id, name, email, avatar FROM users WHERE role = 'patient'").all();
@@ -311,11 +675,23 @@ app.get('/api/patients', (req, res) => {
 });
 
 // Appointments
-app.post('/api/appointments/:id/complete', (req, res) => {
+app.post('/api/appointments/:id/complete', authenticateToken, (req: any, res) => {
   const { id } = req.params;
   const { status } = req.body; // 'completed' or 'no-show'
 
+  if (req.user.role !== 'psychologist') {
+    logSecurityEvent('UNAUTHORIZED_ACTION', { userId: req.user.id, action: 'complete_appointment', appointmentId: id, ip: req.ip });
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
+
   try {
+    // Verify ownership
+    // @ts-ignore
+    const apt = db.prepare('SELECT * FROM appointments WHERE id = ?').get(id);
+    if (!apt || apt.psychologist_id !== req.user.id) {
+      return res.status(403).json({ error: 'Você não tem permissão para atualizar este agendamento.' });
+    }
+
     // @ts-ignore
     db.prepare('UPDATE appointments SET status = ? WHERE id = ?').run(status, id);
     res.json({ success: true });
@@ -325,13 +701,10 @@ app.post('/api/appointments/:id/complete', (req, res) => {
   }
 });
 
-app.get('/api/appointments', (req, res) => {
-  const { userId, role } = req.query;
+app.get('/api/appointments', authenticateToken, (req: any, res) => {
+  const userId = req.user.id;
+  const role = req.user.role;
   
-  if (!userId || !role) {
-    return res.status(400).json({ error: 'Missing userId or role' });
-  }
-
   let stmt;
   if (role === 'psychologist') {
     // @ts-ignore
@@ -360,14 +733,25 @@ app.get('/api/appointments', (req, res) => {
 });
 
 // Mood Logs
-app.get('/api/mood/:patientId', (req, res) => {
+app.get('/api/mood/:patientId', authenticateToken, (req: any, res) => {
+  const { patientId } = req.params;
+  
+  // Only the patient themselves or their psychologist should see this
+  // In a real app, we'd check the relationship. For now, let's allow the patient or any psychologist
+  if (req.user.role === 'patient' && req.user.id !== patientId) {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
+
   // @ts-ignore
-  const logs = db.prepare('SELECT * FROM mood_logs WHERE patient_id = ? ORDER BY date DESC LIMIT 7').all(req.params.patientId);
+  const logs = db.prepare('SELECT * FROM mood_logs WHERE patient_id = ? ORDER BY date DESC LIMIT 7').all(patientId);
   res.json(logs);
 });
 
-app.post('/api/mood', (req, res) => {
-  const { patientId, score, note } = req.body;
+app.post('/api/mood', authenticateToken, (req: any, res) => {
+  const patientId = req.user.id;
+  if (req.user.role !== 'patient') return res.status(403).json({ error: 'Apenas pacientes podem registrar humor.' });
+  
+  const { score, note } = req.body;
   const id = uuidv4();
   const date = new Date().toISOString();
   // @ts-ignore
@@ -376,7 +760,7 @@ app.post('/api/mood', (req, res) => {
 });
 
 // Materials
-app.get('/api/materials', (req, res) => {
+app.get('/api/materials', authenticateToken, (req: any, res) => {
   const { psychologistId } = req.query;
   let stmt;
   if (psychologistId) {
@@ -390,8 +774,10 @@ app.get('/api/materials', (req, res) => {
   }
 });
 
-app.post('/api/materials', (req, res) => {
-  const { psychologistId, title, type, contentUrl, description } = req.body;
+app.post('/api/materials', authenticateToken, (req: any, res) => {
+  if (req.user.role !== 'psychologist') return res.status(403).json({ error: 'Acesso negado.' });
+  const psychologistId = req.user.id;
+  const { title, type, contentUrl, description } = req.body;
   const id = uuidv4();
   const createdAt = new Date().toISOString();
   // @ts-ignore
@@ -400,8 +786,19 @@ app.post('/api/materials', (req, res) => {
 });
 
 // Tasks
-app.get('/api/tasks', (req, res) => {
+app.get('/api/tasks', authenticateToken, (req: any, res) => {
   const { patientId, psychologistId } = req.query;
+  const userId = req.user.id;
+  const role = req.user.role;
+
+  if (role === 'patient' && patientId !== userId) {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
+
+  if (role === 'psychologist' && psychologistId !== userId && !patientId) {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
+
   let stmt;
   if (patientId) {
     // @ts-ignore
@@ -416,8 +813,10 @@ app.get('/api/tasks', (req, res) => {
   }
 });
 
-app.post('/api/tasks', (req, res) => {
-  const { psychologistId, patientId, title, description, dueDate } = req.body;
+app.post('/api/tasks', authenticateToken, (req: any, res) => {
+  if (req.user.role !== 'psychologist') return res.status(403).json({ error: 'Acesso negado.' });
+  const psychologistId = req.user.id;
+  const { patientId, title, description, dueDate } = req.body;
   const id = uuidv4();
   const createdAt = new Date().toISOString();
   // @ts-ignore
@@ -425,27 +824,50 @@ app.post('/api/tasks', (req, res) => {
   res.json({ id, createdAt });
 });
 
-app.post('/api/tasks/:id/complete', (req, res) => {
+app.post('/api/tasks/:id/complete', authenticateToken, (req: any, res) => {
   const { id } = req.params;
   const { status } = req.body; // 'completed' or 'pending'
+  
+  // Verify ownership
+  // @ts-ignore
+  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
+  if (!task || (task.patient_id !== req.user.id && task.psychologist_id !== req.user.id)) {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
+
   // @ts-ignore
   db.prepare('UPDATE tasks SET status = ? WHERE id = ?').run(status, id);
   res.json({ success: true });
 });
 
 // Appointment Notes (Patient Private)
-app.get('/api/appointments/:id/notes', (req, res) => {
+app.get('/api/appointments/:id/notes', authenticateToken, (req: any, res) => {
   const { id } = req.params;
+  
+  // Verify ownership
+  // @ts-ignore
+  const apt = db.prepare('SELECT * FROM appointments WHERE id = ?').get(id);
+  if (!apt || (apt.patient_id !== req.user.id && apt.psychologist_id !== req.user.id)) {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
+
   // @ts-ignore
   const notes = db.prepare('SELECT * FROM appointment_notes WHERE appointment_id = ?').get(id);
   res.json(notes || { patient_notes: '' });
 });
 
-app.post('/api/appointments/:id/notes', (req, res) => {
+app.post('/api/appointments/:id/notes', authenticateToken, (req: any, res) => {
   const { id } = req.params;
   const { patientNotes } = req.body;
   const noteId = uuidv4();
   
+  // Verify ownership
+  // @ts-ignore
+  const apt = db.prepare('SELECT * FROM appointments WHERE id = ?').get(id);
+  if (!apt || apt.patient_id !== req.user.id) {
+    return res.status(403).json({ error: 'Apenas o paciente pode salvar notas pessoais.' });
+  }
+
   try {
     // @ts-ignore
     db.prepare('INSERT INTO appointment_notes (id, appointment_id, patient_notes) VALUES (?, ?, ?) ON CONFLICT(appointment_id) DO UPDATE SET patient_notes = excluded.patient_notes').run(noteId, id, patientNotes);
@@ -457,12 +879,12 @@ app.post('/api/appointments/:id/notes', (req, res) => {
 });
 
 // Questionnaire Endpoints
-app.get('/api/questionnaires/templates', (req, res) => {
+app.get('/api/questionnaires/templates', authenticateToken, (req: any, res) => {
   const templates = db.prepare('SELECT * FROM questionnaire_templates').all();
   res.json(templates);
 });
 
-app.get('/api/questionnaires/templates/:id', (req, res) => {
+app.get('/api/questionnaires/templates/:id', authenticateToken, (req: any, res) => {
   const template = db.prepare('SELECT * FROM questionnaire_templates WHERE id = ?').get(req.params.id);
   if (!template) return res.status(404).json({ error: 'Template not found' });
   
@@ -470,16 +892,28 @@ app.get('/api/questionnaires/templates/:id', (req, res) => {
   res.json({ ...template, questions: questions.map((q: any) => ({ ...q, options: JSON.parse(q.options_json || '[]') })) });
 });
 
-app.post('/api/questionnaires/assign', (req, res) => {
-  const { patientId, psychologistId, templateId, dueDate } = req.body;
+app.post('/api/questionnaires/assign', authenticateToken, (req: any, res) => {
+  if (req.user.role !== 'psychologist') return res.status(403).json({ error: 'Acesso negado.' });
+  const psychologistId = req.user.id;
+  const { patientId, templateId, dueDate } = req.body;
   const id = uuidv4();
   db.prepare('INSERT INTO questionnaire_assignments (id, patient_id, psychologist_id, template_id, assigned_at, due_date) VALUES (?, ?, ?, ?, ?, ?)')
     .run(id, patientId, psychologistId, templateId, new Date().toISOString(), dueDate);
   res.json({ id });
 });
 
-app.get('/api/questionnaires/assignments', (req, res) => {
+app.get('/api/questionnaires/assignments', authenticateToken, (req: any, res) => {
   const { patientId, psychologistId } = req.query;
+  const userId = req.user.id;
+  const role = req.user.role;
+
+  if (role === 'patient' && patientId !== userId) {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
+  if (role === 'psychologist' && psychologistId !== userId && !patientId) {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
+
   let query = `
     SELECT a.*, t.name as template_name, t.is_standardized, u.name as psychologist_name
     FROM questionnaire_assignments a
@@ -503,7 +937,7 @@ app.get('/api/questionnaires/assignments', (req, res) => {
   res.json(assignments);
 });
 
-app.get('/api/questionnaires/assignments/:id', (req, res) => {
+app.get('/api/questionnaires/assignments/:id', authenticateToken, (req: any, res) => {
   const assignment = db.prepare(`
     SELECT a.*, t.name as template_name, t.instructions, t.description
     FROM questionnaire_assignments a
@@ -513,6 +947,11 @@ app.get('/api/questionnaires/assignments/:id', (req, res) => {
   
   if (!assignment) return res.status(404).json({ error: 'Assignment not found' });
   
+  // Verify ownership
+  if (assignment.patient_id !== req.user.id && assignment.psychologist_id !== req.user.id) {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
+
   const questions = db.prepare('SELECT * FROM questions WHERE template_id = ? ORDER BY sort_order').all();
   res.json({ 
     ...assignment, 
@@ -520,18 +959,22 @@ app.get('/api/questionnaires/assignments/:id', (req, res) => {
   });
 });
 
-app.post('/api/questionnaires/responses', (req, res) => {
+app.post('/api/questionnaires/responses', authenticateToken, (req: any, res) => {
   const { assignment_id, answers } = req.body;
   const id = uuidv4();
   const respondedAt = new Date().toISOString();
   
-  // Calculate scores if it's a standardized questionnaire
+  // Verify ownership and status
   const assignment = db.prepare(`
-    SELECT a.template_id, t.is_standardized 
+    SELECT a.template_id, a.patient_id, t.is_standardized 
     FROM questionnaire_assignments a
     JOIN questionnaire_templates t ON a.template_id = t.id
     WHERE a.id = ?
   `).get(assignment_id);
+
+  if (!assignment || assignment.patient_id !== req.user.id) {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
 
   let totalScore = 0;
   if (assignment.is_standardized) {
@@ -560,7 +1003,13 @@ app.post('/api/questionnaires/responses', (req, res) => {
   res.json({ id, totalScore });
 });
 
-app.get('/api/questionnaires/results/:patientId', (req, res) => {
+app.get('/api/questionnaires/results/:patientId', authenticateToken, (req: any, res) => {
+  const { patientId } = req.params;
+  
+  if (req.user.role === 'patient' && req.user.id !== patientId) {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
+
   const results = db.prepare(`
     SELECT r.*, a.assigned_at, t.name as template_name, t.is_standardized
     FROM questionnaire_responses r
@@ -568,7 +1017,7 @@ app.get('/api/questionnaires/results/:patientId', (req, res) => {
     JOIN questionnaire_templates t ON a.template_id = t.id
     WHERE a.patient_id = ?
     ORDER BY r.responded_at DESC
-  `).all(req.params.patientId);
+  `).all(patientId);
   
   res.json(results.map((r: any) => ({
     ...r,
@@ -578,7 +1027,8 @@ app.get('/api/questionnaires/results/:patientId', (req, res) => {
 });
 
 // AI Analysis
-app.post('/api/ai/analyze-session', async (req, res) => {
+app.post('/api/ai/analyze-session', authenticateToken, async (req: any, res) => {
+  if (req.user.role !== 'psychologist') return res.status(403).json({ error: 'Acesso negado.' });
   const { notes } = req.body;
   
   if (!process.env.GEMINI_API_KEY) {
@@ -617,8 +1067,9 @@ app.post('/api/ai/analyze-session', async (req, res) => {
 });
 
 // Messages
-app.get('/api/messages', (req, res) => {
-  const { userId, contactId } = req.query;
+app.get('/api/messages', authenticateToken, (req: any, res) => {
+  const { contactId } = req.query;
+  const userId = req.user.id;
   // @ts-ignore
   const messages = db.prepare(`
     SELECT * FROM messages 
@@ -629,8 +1080,9 @@ app.get('/api/messages', (req, res) => {
   res.json(messages);
 });
 
-app.post('/api/messages', (req, res) => {
-  const { senderId, receiverId, content } = req.body;
+app.post('/api/messages', authenticateToken, (req: any, res) => {
+  const { receiverId, content } = req.body;
+  const senderId = req.user.id;
   const id = uuidv4();
   const timestamp = new Date().toISOString();
   
@@ -643,18 +1095,20 @@ app.post('/api/messages', (req, res) => {
 });
 
 // Contacts (Psychologist <-> Patient)
-app.get('/api/contacts', (req, res) => {
-  const { userId, role } = req.query;
+app.get('/api/contacts', authenticateToken, (req: any, res) => {
+  const { role } = req.user;
   let contacts;
   
   if (role === 'psychologist') {
     // Get all patients
     // @ts-ignore
     contacts = db.prepare("SELECT id, name, avatar, email FROM users WHERE role = 'patient'").all();
-  } else {
+  } else if (role === 'patient') {
     // Get all psychologists
     // @ts-ignore
     contacts = db.prepare("SELECT id, name, avatar, email FROM users WHERE role = 'psychologist'").all();
+  } else {
+    contacts = [];
   }
   res.json(contacts);
 });
@@ -727,9 +1181,13 @@ app.get('/api/psychologists/:id/availability-rules', (req, res) => {
   res.json(rules);
 });
 
-app.post('/api/psychologists/:id/availability', (req, res) => {
+app.post('/api/psychologists/:id/availability', authenticateToken, (req: any, res) => {
   const { id } = req.params;
   const { availability } = req.body; // Array of { day_of_week, start_time, end_time }
+
+  if (req.user.id !== id || req.user.role !== 'psychologist') {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
 
   try {
     db.transaction(() => {
@@ -749,8 +1207,18 @@ app.post('/api/psychologists/:id/availability', (req, res) => {
 });
 
 // Calendar / Appointments Management
-app.post('/api/appointments', async (req, res) => {
+app.post('/api/appointments', authenticateToken, async (req: any, res) => {
   const { psychologistId, patientId, date } = req.body;
+  const userId = req.user.id;
+  const role = req.user.role;
+
+  if (role === 'patient' && patientId !== userId) {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
+  if (role === 'psychologist' && psychologistId !== userId) {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
+
   const id = uuidv4();
   
   try {
@@ -822,12 +1290,128 @@ app.post('/api/appointments', async (req, res) => {
 });
 
 // Journal
-app.get('/api/journal/:userId', (req, res) => {
+app.get('/api/journal/:userId', authenticateToken, (req: any, res) => {
+  const { userId } = req.params;
+  if (req.user.id !== userId && req.user.role !== 'psychologist') {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
   // Reuse mood_logs as journal entries for now, or create separate table
   // Using mood_logs for simplicity as it has 'note'
   // @ts-ignore
-  const logs = db.prepare('SELECT * FROM mood_logs WHERE patient_id = ? ORDER BY date DESC').all(req.params.userId);
+  const logs = db.prepare('SELECT * FROM mood_logs WHERE patient_id = ? ORDER BY date DESC').all(userId);
   res.json(logs);
+});
+
+// Mercado Pago Integration
+app.post('/api/payments/create-preference', authenticateToken, async (req: any, res) => {
+  const { appointmentId, title, unit_price } = req.body;
+  
+  if (req.user.role !== 'patient') return res.status(403).json({ error: 'Acesso negado.' });
+  
+  try {
+    // Verify appointment belongs to patient
+    // @ts-ignore
+    const appointment = db.prepare(`
+      SELECT a.*, u.mercadopago_access_token 
+      FROM appointments a 
+      JOIN users u ON a.psychologist_id = u.id 
+      WHERE a.id = ? AND a.patient_id = ?
+    `).get(appointmentId, req.user.id);
+
+    if (!appointment) {
+      return res.status(403).json({ error: 'Agendamento não encontrado ou acesso negado.' });
+    }
+
+    const client = new MercadoPagoConfig({ accessToken: appointment.mercadopago_access_token });
+    const preference = new Preference(client);
+
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.headers['x-forwarded-host'] || req.get('host');
+    const appUrl = `${protocol}://${host}`;
+
+    const result = await preference.create({
+      body: {
+        items: [
+          {
+            id: appointmentId,
+            title: title || 'Sessão de Terapia',
+            unit_price: Number(unit_price) || 150.0,
+            quantity: 1,
+            currency_id: 'BRL'
+          }
+        ],
+        back_urls: {
+          success: `${appUrl}/dashboard/appointments?payment=success`,
+          failure: `${appUrl}/dashboard/appointments?payment=failure`,
+          pending: `${appUrl}/dashboard/appointments?payment=pending`,
+        },
+        auto_return: 'approved',
+        external_reference: appointmentId,
+        notification_url: `${appUrl}/api/payments/webhook`
+      }
+    });
+
+    res.json({ id: result.id, init_point: result.init_point });
+  } catch (error) {
+    console.error('Mercado Pago Error:', error);
+    res.status(500).json({ error: 'Erro ao criar preferência de pagamento.' });
+  }
+});
+
+app.post('/api/payments/webhook', async (req, res) => {
+  const { action, data, type } = req.body;
+  
+  // In a production app, we MUST verify the signature from Mercado Pago
+  // const signature = req.headers['x-signature'];
+  // if (!verifyMercadoPagoSignature(signature, req.body)) {
+  //   return res.status(403).send('Invalid signature');
+  // }
+
+  console.log('Webhook received:', { type, action, data });
+  
+  if (type === 'payment' && (action === 'payment.created' || action === 'payment.updated')) {
+    const paymentId = data.id;
+    
+    try {
+      // Fetch payment details from Mercado Pago to get the external_reference (appointmentId)
+      // This requires the access token of the psychologist who owns the appointment
+      // For simplicity in this demo, we'll assume we can find the appointment by payment_id
+      // In a real app, you'd use the external_reference sent in the preference
+      
+      // @ts-ignore
+      const appointment = db.prepare('SELECT * FROM appointments WHERE payment_id = ?').get(paymentId);
+      
+      if (appointment) {
+        // Here you would call MP API to get the current status
+        // For now, let's simulate the update if we receive a 'payment' type
+        // @ts-ignore
+        db.prepare('UPDATE appointments SET payment_status = "approved" WHERE payment_id = ?').run(paymentId);
+        console.log(`Appointment ${appointment.id} marked as paid via webhook.`);
+      }
+    } catch (error) {
+      console.error('Webhook processing error:', error);
+    }
+  }
+  
+  res.status(200).send('OK');
+});
+
+app.post('/api/users/:userId/mercadopago-token', authenticateToken, (req: any, res) => {
+  const { userId } = req.params;
+  const { token } = req.body;
+  
+  if (req.user.id !== userId || req.user.role !== 'psychologist') {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
+  
+  try {
+    // @ts-ignore
+    db.prepare('UPDATE users SET mercadopago_access_token = ? WHERE id = ?').run(token, userId);
+    res.json({ success: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to update token' });
+  }
 });
 
 async function startServer() {

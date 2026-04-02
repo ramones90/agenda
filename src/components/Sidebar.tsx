@@ -38,6 +38,7 @@ export function Sidebar({ role }: SidebarProps) {
     { to: '/dashboard/journal', icon: BookOpen, label: 'Diário' },
     { to: '/dashboard/calendar', icon: Calendar, label: 'Agenda' },
     { to: '/dashboard/progress', icon: Activity, label: 'Progresso' },
+    { to: '/dashboard/messages', icon: MessageSquare, label: 'Mensagens' },
     { to: '/dashboard/profile', icon: User, label: 'Perfil' },
   ];
 

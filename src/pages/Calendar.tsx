@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useAuthStore } from '../store/auth';
+import { apiFetch } from '../lib/api';
 import { Calendar as CalendarIcon, Clock, User, Plus, X, Check, ChevronRight, Video, Link as LinkIcon, Trash2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -46,7 +47,7 @@ export default function CalendarPage() {
     const psychologistId = user?.role === 'psychologist' ? user.id : selectedContact;
     if (!psychologistId) return;
     try {
-      const res = await fetch(`/api/psychologists/${psychologistId}/work-days`);
+      const res = await apiFetch(`/api/psychologists/${psychologistId}/work-days`);
       const data = await res.json();
       setWorkDays(data);
     } catch (error) {
@@ -60,7 +61,7 @@ export default function CalendarPage() {
 
     setIsLoadingSlots(true);
     try {
-      const res = await fetch(`/api/psychologists/${psychologistId}/availability?date=${selectedDate}`);
+      const res = await apiFetch(`/api/psychologists/${psychologistId}/availability?date=${selectedDate}`);
       const data = await res.json();
       setAvailableSlots(data.slots || []);
     } catch (error) {
@@ -73,7 +74,7 @@ export default function CalendarPage() {
   const fetchAvailabilityRules = async () => {
     if (!user) return;
     try {
-      const res = await fetch(`/api/psychologists/${user.id}/availability-rules`);
+      const res = await apiFetch(`/api/psychologists/${user.id}/availability-rules`);
       const data = await res.json();
       setAvailabilityRules(data);
     } catch (error) {
@@ -84,9 +85,8 @@ export default function CalendarPage() {
   const handleSaveAvailability = async (newRules: any[]) => {
     if (!user) return;
     try {
-      await fetch(`/api/psychologists/${user.id}/availability`, {
+      await apiFetch(`/api/psychologists/${user.id}/availability`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ availability: newRules }),
       });
       setAvailabilityRules(newRules);
@@ -100,7 +100,7 @@ export default function CalendarPage() {
   const checkGoogleStatus = async () => {
     if (!user) return;
     try {
-      const res = await fetch(`/api/users/${user.id}/google-status`);
+      const res = await apiFetch(`/api/users/${user.id}/google-status`);
       const data = await res.json();
       setIsGoogleConnected(data.isConnected);
     } catch (error) {
@@ -111,7 +111,7 @@ export default function CalendarPage() {
   const handleConnectGoogle = async () => {
     if (!user) return;
     try {
-      const res = await fetch(`/api/auth/google/url?userId=${user.id}`);
+      const res = await apiFetch(`/api/auth/google/url?userId=${user.id}`);
       const { url } = await res.json();
       
       const width = 500;
@@ -139,13 +139,13 @@ export default function CalendarPage() {
   };
 
   const fetchAppointments = () => {
-    fetch(`/api/appointments?userId=${user?.id}&role=${user?.role}`)
+    apiFetch(`/api/appointments?userId=${user?.id}&role=${user?.role}`)
       .then(res => res.json())
       .then(setAppointments);
   };
 
   const fetchContacts = () => {
-    fetch(`/api/contacts?userId=${user?.id}&role=${user?.role}`)
+    apiFetch(`/api/contacts?userId=${user?.id}&role=${user?.role}`)
       .then(res => res.json())
       .then(setContacts);
   };
@@ -156,9 +156,8 @@ export default function CalendarPage() {
       ? { psychologistId: user.id, patientId: selectedContact, date: dateTime }
       : { psychologistId: selectedContact, patientId: user?.id, date: dateTime };
 
-    await fetch('/api/appointments', {
+    await apiFetch('/api/appointments', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
 

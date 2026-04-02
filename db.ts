@@ -30,7 +30,21 @@ db.exec(`
     password TEXT,
     avatar TEXT,
     phone TEXT,
-    birthDate TEXT
+    birthDate TEXT,
+    mercadopago_access_token TEXT,
+    google_refresh_token TEXT,
+    mfa_secret TEXT,
+    mfa_enabled INTEGER DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS audit_logs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT,
+    event TEXT NOT NULL,
+    details TEXT,
+    ip TEXT,
+    severity TEXT DEFAULT 'info', -- 'info', 'warning', 'critical'
+    timestamp TEXT NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS appointments (
@@ -151,6 +165,14 @@ db.exec(`
     end_time TEXT NOT NULL, -- HH:mm
     FOREIGN KEY(psychologist_id) REFERENCES users(id)
   );
+
+  CREATE TABLE IF NOT EXISTS refresh_tokens (
+    token TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    revoked INTEGER DEFAULT 0,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
 `);
 
 // Seed Questionnaires
@@ -241,6 +263,30 @@ try {
 
 try {
   db.exec('ALTER TABLE appointments ADD COLUMN google_calendar_event_id TEXT');
+} catch (error) {
+  // Column likely already exists
+}
+
+try {
+  db.exec('ALTER TABLE appointments ADD COLUMN price REAL DEFAULT 150.0');
+} catch (error) {
+  // Column likely already exists
+}
+
+try {
+  db.exec('ALTER TABLE appointments ADD COLUMN payment_status TEXT DEFAULT "pending"');
+} catch (error) {
+  // Column likely already exists
+}
+
+try {
+  db.exec('ALTER TABLE appointments ADD COLUMN payment_id TEXT');
+} catch (error) {
+  // Column likely already exists
+}
+
+try {
+  db.exec('ALTER TABLE users ADD COLUMN mercadopago_access_token TEXT');
 } catch (error) {
   // Column likely already exists
 }

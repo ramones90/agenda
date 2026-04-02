@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAuthStore } from '../store/auth';
+import { apiFetch } from '../lib/api';
 
 export default function WaitingRoom() {
   const { id: roomId } = useParams();
@@ -29,7 +30,7 @@ export default function WaitingRoom() {
   useEffect(() => {
     const fetchAppointment = async () => {
       try {
-        const res = await fetch(`/api/rooms/${roomId}/validate?userId=${user?.id}`);
+        const res = await apiFetch(`/api/rooms/${roomId}/validate?userId=${user?.id}`);
         const data = await res.json();
         if (data.authorized) {
           setAppointment(data.appointment);

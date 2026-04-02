@@ -8,6 +8,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import { io, Socket } from 'socket.io-client';
 import { useAuthStore } from '../store/auth';
+import { apiFetch } from '../lib/api';
+import { ConfirmModal } from '../components/ConfirmModal';
 import SimplePeer from 'simple-peer';
 
 // Fix for simple-peer in Vite
@@ -48,6 +50,7 @@ export default function VideoRoom() {
   
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState('');
+  const [showConfirmEnd, setShowConfirmEnd] = useState(false);
   
   const [mediaError, setMediaError] = useState<string | null>(null);
   
@@ -59,7 +62,7 @@ export default function VideoRoom() {
   useEffect(() => {
     const validateRoom = async () => {
       try {
-        const res = await fetch(`/api/rooms/${roomId}/validate?userId=${user?.id}`);
+        const res = await apiFetch(`/api/rooms/${roomId}/validate?userId=${user?.id}`);
         const data = await res.json();
         if (data.authorized) {
           setIsAuthorized(true);
@@ -276,13 +279,10 @@ export default function VideoRoom() {
     setNewMessage('');
   };
 
-  const endCall = async () => {
+  const endCall = async (completed: boolean) => {
     if (role === 'psychologist') {
-      // Ask if session was completed
-      const completed = window.confirm('A sessão foi concluída com sucesso?');
-      await fetch(`/api/appointments/${roomId}/complete`, {
+      await apiFetch(`/api/appointments/${roomId}/complete`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: completed ? 'completed' : 'no-show' }),
       });
     }
@@ -417,7 +417,10 @@ export default function VideoRoom() {
               {isVideoOff ? <VideoOff className="w-6 h-6" /> : <Video className="w-6 h-6" />}
             </button>
             <button 
-              onClick={endCall}
+              onClick={() => {
+                if (role === 'psychologist') setShowConfirmEnd(true);
+                else endCall(true);
+              }}
               className="p-5 px-10 bg-rose-600 hover:bg-rose-500 text-white rounded-3xl font-bold transition-all flex items-center gap-4 shadow-2xl shadow-rose-600/20 group"
             >
               <PhoneOff className="w-6 h-6 group-hover:rotate-[135deg] transition-transform" />
@@ -436,6 +439,16 @@ export default function VideoRoom() {
             </button>
           </div>
         </div>
+
+        <ConfirmModal
+          isOpen={showConfirmEnd}
+          onClose={() => setShowConfirmEnd(false)}
+          onConfirm={() => endCall(true)}
+          title="Encerrar Sessão"
+          message="A sessão foi concluída com sucesso? Se sim, clique em Concluída. Caso contrário, clique em Não Concluída para marcar como falta."
+          confirmLabel="Concluída"
+          cancelLabel="Não Concluída"
+        />
 
         {/* Chat Sidebar */}
         <AnimatePresence>

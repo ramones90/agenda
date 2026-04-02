@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useAuthStore } from '../store/auth';
+import { apiFetch } from '../lib/api';
 import { BookOpen, Clock, Sparkles, Quote } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -26,7 +27,7 @@ export default function Journal() {
 
   useEffect(() => {
     if (user) {
-      fetch(`/api/mood/${user.id}`)
+      apiFetch(`/api/mood/${user.id}`)
         .then(res => res.json())
         .then(data => {
           setLogs(data);

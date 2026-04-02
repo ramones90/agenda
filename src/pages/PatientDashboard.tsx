@@ -1,15 +1,16 @@
 import React, { useEffect, useState } from 'react';
 import { useAuthStore } from '../store/auth';
+import { apiFetch } from '../lib/api';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
 import { 
   Smile, Meh, Frown, Calendar, Video, Clock, 
   ArrowRight, Plus, BookOpen, Activity, 
   CheckCircle2, FileText, ListTodo, MessageSquare,
   ChevronRight, ExternalLink, StickyNote, X, Sparkles, ClipboardList,
-  Bell
+  Bell, CreditCard, User
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 const MOODS = [
   { score: 1, icon: Frown, color: 'text-rose-500', bg: 'bg-rose-100', label: 'Difícil' },
@@ -32,12 +33,17 @@ const PSYCHOLOGIST_QUOTES = [
 export default function PatientDashboard() {
   const { user } = useAuthStore();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [quote, setQuote] = useState(PSYCHOLOGIST_QUOTES[0]);
 
   useEffect(() => {
-    const randomQuote = PSYCHOLOGIST_QUOTES[Math.floor(Math.random() * PSYCHOLOGIST_QUOTES.length)];
-    setQuote(randomQuote);
-  }, []);
+    const paymentStatus = searchParams.get('payment');
+    if (paymentStatus === 'success') {
+      // In a real app, we'd show a success toast
+      console.log('Pagamento realizado com sucesso!');
+    }
+  }, [searchParams]);
+
   const [moodHistory, setMoodHistory] = useState<any[]>([]);
   const [appointments, setAppointments] = useState<any[]>([]);
   const [materials, setMaterials] = useState<any[]>([]);
@@ -48,15 +54,38 @@ export default function PatientDashboard() {
   const [selectedApt, setSelectedApt] = useState<any>(null);
   const [aptNotes, setAptNotes] = useState('');
   const [isSavingNotes, setIsSavingNotes] = useState(false);
+  const [isProcessingPayment, setIsProcessingPayment] = useState(false);
+
+  const handlePayment = async (apt: any) => {
+    setIsProcessingPayment(true);
+    try {
+      const res = await apiFetch('/api/payments/create-preference', {
+        method: 'POST',
+        body: JSON.stringify({
+          appointmentId: apt.id,
+          title: `Sessão com ${apt.psychologist_name}`,
+          unit_price: apt.price || 150.0
+        })
+      });
+      const data = await res.json();
+      if (data.init_point) {
+        window.location.href = data.init_point;
+      }
+    } catch (error) {
+      console.error('Erro ao processar pagamento:', error);
+    } finally {
+      setIsProcessingPayment(false);
+    }
+  };
 
   useEffect(() => {
     if (user) {
       Promise.all([
-        fetch(`/api/mood/${user.id}`).then(res => res.json()),
-        fetch(`/api/appointments?userId=${user.id}&role=patient`).then(res => res.json()),
-        fetch(`/api/materials`).then(res => res.json()),
-        fetch(`/api/tasks?patientId=${user.id}`).then(res => res.json()),
-        fetch(`/api/questionnaires/assignments?patientId=${user.id}`).then(res => res.json())
+        apiFetch(`/api/mood/${user.id}`).then(res => res.json()),
+        apiFetch(`/api/appointments?userId=${user.id}&role=patient`).then(res => res.json()),
+        apiFetch(`/api/materials`).then(res => res.json()),
+        apiFetch(`/api/tasks?patientId=${user.id}`).then(res => res.json()),
+        apiFetch(`/api/questionnaires/assignments?patientId=${user.id}`).then(res => res.json())
       ]).then(([moods, apts, mats, tks, qs]) => {
         setMoodHistory(moods);
         setAppointments(apts);
@@ -70,27 +99,25 @@ export default function PatientDashboard() {
 
   const handleMoodSubmit = async (score: number) => {
     setTodayMood(score);
-    await fetch('/api/mood', {
+    await apiFetch('/api/mood', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ patientId: user?.id, score, note: 'Check-in rápido' }),
     });
-    fetch(`/api/mood/${user?.id}`).then(res => res.json()).then(setMoodHistory);
+    apiFetch(`/api/mood/${user?.id}`).then(res => res.json()).then(setMoodHistory);
   };
 
   const toggleTask = async (taskId: string, currentStatus: string) => {
     const newStatus = currentStatus === 'completed' ? 'pending' : 'completed';
     setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: newStatus } : t));
-    await fetch(`/api/tasks/${taskId}/complete`, {
+    await apiFetch(`/api/tasks/${taskId}/complete`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: newStatus }),
     });
   };
 
   const openAptDetails = async (apt: any) => {
     setSelectedApt(apt);
-    const res = await fetch(`/api/appointments/${apt.id}/notes`);
+    const res = await apiFetch(`/api/appointments/${apt.id}/notes`);
     const data = await res.json();
     setAptNotes(data.patient_notes || '');
   };
@@ -98,9 +125,8 @@ export default function PatientDashboard() {
   const saveAptNotes = async () => {
     if (!selectedApt) return;
     setIsSavingNotes(true);
-    await fetch(`/api/appointments/${selectedApt.id}/notes`, {
+    await apiFetch(`/api/appointments/${selectedApt.id}/notes`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ patientNotes: aptNotes }),
     });
     setIsSavingNotes(false);
@@ -237,6 +263,16 @@ export default function PatientDashboard() {
                   </div>
 
                   <div className="flex flex-col gap-4 w-full md:w-auto">
+                    {nextAppointment.payment_status !== 'paid' && (
+                      <button 
+                        onClick={() => handlePayment(nextAppointment)}
+                        disabled={isProcessingPayment}
+                        className="px-12 py-6 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-bold transition-all transform hover:scale-[1.02] flex items-center justify-center gap-3 shadow-xl shadow-emerald-900/10 disabled:opacity-50"
+                      >
+                        <CreditCard className="w-6 h-6" />
+                        {isProcessingPayment ? 'Processando...' : 'Pagar Sessão'}
+                      </button>
+                    )}
                     <button 
                       onClick={() => navigate(`/waiting-room/${nextAppointment.id}`)}
                       className="px-12 py-6 bg-stone-800 hover:bg-stone-700 text-white rounded-2xl font-bold transition-all transform hover:scale-[1.02] flex items-center justify-center gap-3 shadow-xl shadow-stone-900/10"
@@ -268,6 +304,28 @@ export default function PatientDashboard() {
               )}
             </div>
           </motion.div>
+
+          {/* Meu Espaço Navigation */}
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-6">
+            {[
+              { to: '/dashboard/journal', icon: BookOpen, label: 'Diário', color: 'bg-emerald-50 text-emerald-600' },
+              { to: '/dashboard/calendar', icon: Calendar, label: 'Agenda', color: 'bg-blue-50 text-blue-600' },
+              { to: '/dashboard/progress', icon: Activity, label: 'Progresso', color: 'bg-amber-50 text-amber-600' },
+              { to: '/dashboard/messages', icon: MessageSquare, label: 'Mensagens', color: 'bg-purple-50 text-purple-600' },
+              { to: '/dashboard/profile', icon: User, label: 'Perfil', color: 'bg-stone-100 text-stone-600' },
+            ].map((item, i) => (
+              <Link 
+                key={i}
+                to={item.to}
+                className="bg-white p-8 rounded-[2.5rem] border border-stone-100 shadow-sm hover:shadow-md transition-all group text-center flex flex-col items-center gap-4"
+              >
+                <div className={`w-14 h-14 ${item.color} rounded-2xl flex items-center justify-center group-hover:scale-110 transition-transform`}>
+                  <item.icon className="w-7 h-7" />
+                </div>
+                <span className="font-serif italic text-lg text-stone-800">{item.label}</span>
+              </Link>
+            ))}
+          </div>
 
           {/* Secondary Grid: Materials & Tasks */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
@@ -614,15 +672,27 @@ export default function PatientDashboard() {
                 </div>
               </div>
 
-              <div className="p-8 bg-stone-50 border-t border-stone-100 flex gap-4">
+              <div className="p-8 bg-stone-50 border-t border-stone-100 flex flex-col sm:flex-row gap-4">
                 {selectedApt.status === 'scheduled' && (
-                  <button 
-                    onClick={() => navigate(`/waiting-room/${selectedApt.id}`)}
-                    className="flex-1 py-4 bg-stone-800 text-white rounded-2xl font-bold hover:bg-stone-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-stone-900/10"
-                  >
-                    <Video className="w-5 h-5" />
-                    Ir para Sala de Espera
-                  </button>
+                  <>
+                    {selectedApt.payment_status !== 'paid' && (
+                      <button 
+                        onClick={() => handlePayment(selectedApt)}
+                        disabled={isProcessingPayment}
+                        className="flex-1 py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/10 disabled:opacity-50"
+                      >
+                        <CreditCard className="w-5 h-5" />
+                        {isProcessingPayment ? 'Processando...' : 'Pagar Agora'}
+                      </button>
+                    )}
+                    <button 
+                      onClick={() => navigate(`/waiting-room/${selectedApt.id}`)}
+                      className="flex-1 py-4 bg-stone-800 text-white rounded-2xl font-bold hover:bg-stone-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-stone-900/10"
+                    >
+                      <Video className="w-5 h-5" />
+                      Ir para Sala de Espera
+                    </button>
+                  </>
                 )}
                 <button className="flex-1 py-4 bg-white text-stone-600 border border-stone-200 rounded-2xl font-bold hover:bg-stone-100 transition-all">
                   Reagendar Sessão

@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAuthStore } from '../store/auth';
+import { apiFetch } from '../lib/api';
 import { AiNoteAssistant } from '../components/AiNoteAssistant';
 
 export default function PatientDetails() {
@@ -24,7 +25,7 @@ export default function PatientDetails() {
   useEffect(() => {
     if (id) {
       // Fetch patient details
-      fetch(`/api/contacts?userId=${user?.id}&role=psychologist`)
+      apiFetch(`/api/contacts?userId=${user?.id}&role=psychologist`)
         .then(res => res.json())
         .then(data => {
           const found = data.find((p: any) => p.id === id);
@@ -178,7 +179,7 @@ export default function PatientDetails() {
         {/* Right Column: Tabs & Content */}
         <div className="lg:col-span-8 space-y-8">
           {/* Tabs */}
-          <nav className="flex items-center gap-2 p-1.5 bg-stone-100 rounded-[2rem] w-full lg:w-fit overflow-x-auto no-scrollbar">
+          <nav className="relative flex items-center gap-1 p-1.5 bg-stone-100 rounded-[2rem] w-full lg:w-fit overflow-x-auto no-scrollbar">
             {[
               { id: 'prontuario', label: 'Prontuário', icon: FileText },
               { id: 'questionarios', label: 'Questionários', icon: CheckCircle2 },
@@ -187,27 +188,35 @@ export default function PatientDetails() {
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-2 lg:gap-3 px-4 lg:px-8 py-3 lg:py-4 rounded-full text-xs lg:text-sm font-bold transition-all whitespace-nowrap ${
+                className={`relative flex items-center gap-2 lg:gap-3 px-6 lg:px-10 py-3 lg:py-4 rounded-full text-xs lg:text-sm font-bold transition-all whitespace-nowrap z-10 ${
                   activeTab === tab.id 
-                    ? 'bg-white text-stone-900 shadow-sm' 
-                    : 'text-stone-500 hover:text-stone-900'
+                    ? 'text-stone-900' 
+                    : 'text-stone-500 hover:text-stone-700'
                 }`}
               >
-                <tab.icon className="w-3.5 h-3.5 lg:w-4 lg:h-4" />
+                {activeTab === tab.id && (
+                  <motion.div
+                    layoutId="activeTab"
+                    className="absolute inset-0 bg-white rounded-full shadow-sm z-[-1]"
+                    transition={{ type: "spring", bounce: 0.2, duration: 0.6 }}
+                  />
+                )}
+                <tab.icon className={`w-3.5 h-3.5 lg:w-4 lg:h-4 transition-colors ${activeTab === tab.id ? 'text-stone-900' : 'text-stone-400'}`} />
                 {tab.label}
               </button>
             ))}
           </nav>
 
           {/* Tab Content */}
-          <div className="min-h-[600px]">
+          <div className="min-h-[600px] relative">
             <AnimatePresence mode="wait">
               {activeTab === 'prontuario' && (
                 <motion.div
                   key="prontuario"
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -10 }}
+                  initial={{ opacity: 0, x: 20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -20 }}
+                  transition={{ duration: 0.3, ease: "easeOut" }}
                   className="space-y-8"
                 >
                   <div className="flex items-center justify-between">
@@ -266,9 +275,10 @@ export default function PatientDetails() {
               {activeTab === 'questionarios' && (
                 <motion.div
                   key="questionarios"
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -10 }}
+                  initial={{ opacity: 0, x: 20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -20 }}
+                  transition={{ duration: 0.3, ease: "easeOut" }}
                   className="space-y-8"
                 >
                   <div className="flex items-center justify-between">
@@ -312,9 +322,10 @@ export default function PatientDetails() {
               {activeTab === 'historico' && (
                 <motion.div
                   key="historico"
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -10 }}
+                  initial={{ opacity: 0, x: 20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -20 }}
+                  transition={{ duration: 0.3, ease: "easeOut" }}
                   className="space-y-8"
                 >
                   <h3 className="text-2xl font-serif italic text-stone-900">Linha do Tempo</h3>

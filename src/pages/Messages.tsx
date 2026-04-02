@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent } from 'react';
 import { useAuthStore } from '../store/auth';
+import { apiFetch } from '../lib/api';
 import { Send, User } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 
@@ -15,7 +16,7 @@ export default function Messages() {
 
   useEffect(() => {
     // Fetch contacts
-    fetch(`/api/contacts?userId=${user?.id}&role=${user?.role}`)
+    apiFetch(`/api/contacts?userId=${user?.id}&role=${user?.role}`)
       .then(res => res.json())
       .then(setContacts);
 
@@ -40,7 +41,7 @@ export default function Messages() {
 
   useEffect(() => {
     if (selectedContact && user) {
-      fetch(`/api/messages?userId=${user.id}&contactId=${selectedContact.id}`)
+      apiFetch(`/api/messages?userId=${user.id}&contactId=${selectedContact.id}`)
         .then(res => res.json())
         .then(setMessages);
     }
@@ -60,9 +61,8 @@ export default function Messages() {
       content: newMessage
     };
 
-    const res = await fetch('/api/messages', {
+    const res = await apiFetch('/api/messages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(message),
     });
     

@@ -4,9 +4,10 @@ import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { Lock, User, ArrowLeft, Shield, Sparkles } from 'lucide-react';
 import { motion } from 'motion/react';
+import { MfaLogin } from '../../components/MfaLogin';
 
 export default function LoginAdmin() {
-  const { login, user } = useAuthStore();
+  const { login, user, mfaRequired } = useAuthStore();
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -20,12 +21,25 @@ export default function LoginAdmin() {
     e.preventDefault();
     setError('');
     try {
-      await login('admin', email, password);
-      navigate('/dashboard');
+      const result = await login('admin', email, password);
+      if (!result.mfaRequired) {
+        navigate('/dashboard');
+      }
     } catch (error: any) {
       setError(error.message || 'Erro ao entrar. Verifique suas credenciais.');
     }
   };
+
+  if (mfaRequired) {
+    return (
+      <div className="min-h-screen bg-stone-50 flex items-center justify-center p-6">
+        <MfaLogin 
+          userId={mfaRequired.userId} 
+          onSuccess={() => navigate('/dashboard')} 
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-stone-50 flex items-center justify-center p-6 relative overflow-hidden">

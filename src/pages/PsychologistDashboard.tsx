@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useAuthStore } from '../store/auth';
+import { apiFetch } from '../lib/api';
 import { AiNoteAssistant } from '../components/AiNoteAssistant';
-import { Calendar, Clock, Video, ClipboardList, ArrowRight, Sparkles } from 'lucide-react';
+import { Calendar, Clock, Video, ClipboardList, ArrowRight, Sparkles, Settings, Save, CheckCircle, CreditCard } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { motion } from 'motion/react';
 
@@ -9,21 +10,45 @@ export default function PsychologistDashboard() {
   const { user } = useAuthStore();
   const [appointments, setAppointments] = useState([]);
   const [pendingQuestionnaires, setPendingQuestionnaires] = useState(0);
+  const [mpToken, setMpToken] = useState('');
+  const [isSavingToken, setIsSavingToken] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
 
   useEffect(() => {
     if (user) {
-      fetch(`/api/appointments?userId=${user.id}&role=psychologist`)
+      apiFetch(`/api/appointments?userId=${user.id}&role=psychologist`)
         .then(res => res.json())
         .then(data => setAppointments(data));
 
-      fetch(`/api/questionnaires/assignments?psychologistId=${user.id}`)
+      apiFetch(`/api/questionnaires/assignments?psychologistId=${user.id}`)
         .then(res => res.json())
         .then(data => {
           const pending = data.filter((a: any) => a.status === 'pending').length;
           setPendingQuestionnaires(pending);
         });
+
+      apiFetch(`/api/users/${user.id}/mercadopago-status`)
+        .then(res => res.json())
+        .then(data => setMpToken(data.token || ''));
     }
   }, [user]);
+
+  const handleSaveToken = async () => {
+    if (!user) return;
+    setIsSavingToken(true);
+    try {
+      await apiFetch(`/api/users/${user.id}/mercadopago-token`, {
+        method: 'POST',
+        body: JSON.stringify({ token: mpToken }),
+      });
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 3000);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsSavingToken(false);
+    }
+  };
 
   return (
     <div className="space-y-8 lg:space-y-12 max-w-7xl mx-auto px-4 lg:px-6 py-6 lg:py-12">
@@ -65,6 +90,65 @@ export default function PsychologistDashboard() {
               </div>
               <p className="text-stone-500 text-[10px] font-bold uppercase tracking-[0.2em]">Questionários Pendentes</p>
               <h3 className="text-4xl lg:text-5xl font-serif italic mt-2 text-stone-900">{pendingQuestionnaires}</h3>
+            </div>
+          </motion.div>
+
+          {/* Mercado Pago Settings */}
+          <motion.div 
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.1 }}
+            className="bg-white p-8 rounded-[2.5rem] shadow-sm border border-stone-100"
+          >
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center">
+                <CreditCard className="w-5 h-5 text-emerald-600" />
+              </div>
+              <h3 className="text-xl font-serif italic text-stone-900">Pagamentos</h3>
+            </div>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="text-[10px] font-bold uppercase tracking-widest text-stone-400 mb-2 block">
+                  Mercado Pago Access Token
+                </label>
+                <div className="relative">
+                  <input 
+                    type="password"
+                    value={mpToken}
+                    onChange={(e) => setMpToken(e.target.value)}
+                    placeholder="APP_USR-..."
+                    className="w-full px-4 py-3 bg-stone-50 border border-stone-200 rounded-xl focus:ring-2 focus:ring-stone-800 outline-none transition-all text-sm font-mono"
+                  />
+                </div>
+                <p className="text-[10px] text-stone-400 mt-2 leading-relaxed">
+                  Necessário para receber pagamentos das sessões diretamente na sua conta.
+                </p>
+              </div>
+              
+              <button 
+                onClick={handleSaveToken}
+                disabled={isSavingToken}
+                className={`w-full py-3 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2 ${
+                  saveSuccess 
+                    ? 'bg-emerald-500 text-white' 
+                    : 'bg-stone-800 text-white hover:bg-stone-700'
+                } disabled:opacity-50`}
+              >
+                {isSavingToken ? (
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                ) : saveSuccess ? (
+                  <>
+                    <CheckCircle className="w-4 h-4" />
+                    Salvo com Sucesso
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-4 h-4" />
+                    Salvar Configurações
+                  </>
+                )}
+              </button>
             </div>
           </motion.div>
 

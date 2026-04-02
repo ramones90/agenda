@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { apiFetch } from '../lib/api';
 import { Sparkles, Loader2, Check, BrainCircuit, MessageSquareText, Lightbulb } from 'lucide-react';
 import { motion } from 'motion/react';
 
@@ -11,9 +12,8 @@ export function AiNoteAssistant() {
     if (!notes.trim()) return;
     setLoading(true);
     try {
-      const res = await fetch('/api/ai/analyze-session', {
+      const res = await apiFetch('/api/ai/analyze-session', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ notes }),
       });
       const data = await res.json();

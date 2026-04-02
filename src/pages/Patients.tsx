@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useAuthStore } from '../store/auth';
+import { apiFetch } from '../lib/api';
 import { Search, MoreHorizontal, User, Mail, Calendar, ArrowRight, Filter } from 'lucide-react';
 import { motion } from 'motion/react';
 import { Link } from 'react-router-dom';
@@ -11,7 +12,7 @@ export default function Patients() {
 
   useEffect(() => {
     if (user) {
-      fetch(`/api/contacts?userId=${user.id}&role=psychologist`)
+      apiFetch(`/api/contacts?userId=${user.id}&role=psychologist`)
         .then(res => res.json())
         .then(setPatients);
     }

@@ -19,6 +19,7 @@ import {
   Video
 } from 'lucide-react';
 import { useAuthStore } from '../store/auth';
+import { apiFetch } from '../lib/api';
 import { Link, useNavigate } from 'react-router-dom';
 
 interface Template {
@@ -56,9 +57,9 @@ export default function Questionnaires() {
     const fetchData = async () => {
       try {
         const [templatesRes, assignmentsRes, patientsRes] = await Promise.all([
-          fetch('/api/questionnaires/templates'),
-          fetch(`/api/questionnaires/assignments?psychologistId=${user?.id}`),
-          fetch(`/api/patients?psychologistId=${user?.id}`)
+          apiFetch('/api/questionnaires/templates'),
+          apiFetch(`/api/questionnaires/assignments?psychologistId=${user?.id}`),
+          apiFetch(`/api/patients?psychologistId=${user?.id}`)
         ]);
         
         setTemplates(await templatesRes.json());
@@ -79,9 +80,8 @@ export default function Questionnaires() {
     if (!selectedTemplate || !selectedPatient) return;
 
     try {
-      const res = await fetch('/api/questionnaires/assign', {
+      const res = await apiFetch('/api/questionnaires/assign', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           patientId: selectedPatient,
           psychologistId: user?.id,
@@ -93,7 +93,7 @@ export default function Questionnaires() {
       if (res.ok) {
         setShowAssignModal(false);
         // Refresh assignments
-        const assignmentsRes = await fetch(`/api/questionnaires/assignments?psychologistId=${user?.id}`);
+        const assignmentsRes = await apiFetch(`/api/questionnaires/assignments?psychologistId=${user?.id}`);
         setAssignments(await assignmentsRes.json());
       }
     } catch (error) {
@@ -104,9 +104,8 @@ export default function Questionnaires() {
   const handleStartCall = async (patientId: string) => {
     try {
       // Create a quick appointment for now
-      const res = await fetch('/api/appointments', {
+      const res = await apiFetch('/api/appointments', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           psychologistId: user?.id,
           patientId,
@@ -118,9 +117,8 @@ export default function Questionnaires() {
         const data = await res.json();
         
         // Send a message to the patient
-        await fetch('/api/messages', {
+        await apiFetch('/api/messages', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             senderId: user?.id,
             receiverId: patientId,

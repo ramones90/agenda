@@ -17,6 +17,7 @@ import AdminDashboard from './pages/AdminDashboard';
 import Messages from './pages/Messages';
 import CalendarPage from './pages/Calendar';
 import Journal from './pages/Journal';
+import Progress from './pages/Progress';
 import Patients from './pages/Patients';
 import WaitingRoom from './pages/WaitingRoom';
 import Profile from './pages/Profile';
@@ -46,7 +47,11 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-  const { user } = useAuthStore();
+  const { user, checkAuth } = useAuthStore();
+
+  React.useEffect(() => {
+    checkAuth();
+  }, []);
 
   return (
     <BrowserRouter>
@@ -67,6 +72,7 @@ export default function App() {
           <Route path="messages" element={<Messages />} />
           <Route path="calendar" element={<CalendarPage />} />
           <Route path="journal" element={<Journal />} />
+          <Route path="progress" element={<Progress />} />
           <Route path="patients" element={<Patients />} />
           <Route path="patients/:id" element={<PatientDetails />} />
           <Route path="profile" element={<Profile />} />

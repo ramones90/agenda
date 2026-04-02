@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { apiFetch } from '../lib/api';
 import { motion, AnimatePresence } from 'motion/react';
 import { CheckCircle2, ArrowLeft, Send, AlertCircle, Loader2 } from 'lucide-react';
 
@@ -13,7 +14,7 @@ export default function AnswerQuestionnaire() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch(`/api/questionnaires/assignments/${id}`)
+    apiFetch(`/api/questionnaires/assignments/${id}`)
       .then(res => res.json())
       .then(data => {
         if (data.error) setError(data.error);
@@ -31,9 +32,8 @@ export default function AnswerQuestionnaire() {
 
     setIsSubmitting(true);
     try {
-      const res = await fetch('/api/questionnaires/responses', {
+      const res = await apiFetch('/api/questionnaires/responses', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ assignment_id: id, answers }),
       });
       if (res.ok) setIsSuccess(true);
